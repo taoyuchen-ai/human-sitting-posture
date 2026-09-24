@@ -118,10 +118,10 @@ body { font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1a2e; 
   <button id="break-done-btn">我已休息</button>
 </div>
 
-<!-- MediaPipe CDN -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675669404/pose.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+<!-- MediaPipe 本地加载（避免 CDN MIME/网络问题） -->
+<script src="/lib/pose.js" crossorigin="anonymous"></script>
+<script src="/lib/camera_utils.js" crossorigin="anonymous"></script>
+<script src="/lib/drawing_utils.js" crossorigin="anonymous"></script>
 
 <script>
 // ============================================================
@@ -467,7 +467,7 @@ $('start-btn').onclick = async () => {
 
     // 初始化 MediaPipe Pose
     pose = new Pose({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675669404/${file}`
+      locateFile: (file) => `/lib/${file}`
     });
     pose.setOptions({
       modelComplexity: 1,
