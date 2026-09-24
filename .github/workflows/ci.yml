@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  # ---- HTML 校验 ----
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check HTML structure
+        run: |
+          if [ ! -f index.html ]; then
+            echo "::error::index.html not found"
+            exit 1
+          fi
+          # 检查关键标签闭合
+          python3 -c "
+          import html.parser, sys
+          class Checker(html.parser.HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.stack = []
+                  self.void = {'area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr'}
+              def handle_starttag(self, tag, attrs):
+                  if tag not in self.void:
+                      self.stack.append(tag)
+              def handle_endtag(self, tag):
+                  if tag in self.void: return
+                  if not self.stack or self.stack[-1] != tag:
+                      print(f'::error::Mismatched tag: {tag}')
+                      sys.exit(1)
+                  self.stack.pop()
+          c = Checker()
+          c.feed(open('index.html', encoding='utf-8').read())
+          if c.stack:
+              print(f'::error::Unclosed tags: {c.stack}')
+              sys.exit(1)
+          print('HTML structure OK')
+          "
+      - name: Check MediaPipe CDN link
+        run: |
+          if ! grep -q "@mediapipe/pose" index.html; then
+            echo "::error::MediaPipe Pose CDN link missing"
+            exit 1
+          fi
+          echo "MediaPipe CDN link found"
+
+  # ---- 部署到 GitHub Pages ----
+  deploy:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
