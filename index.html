@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 体态监测 — 学生坐姿矫正 Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, "Segoe UI", sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; overflow: hidden; }
+
+/* ===== 左侧：摄像头预览 ===== */
+#camera-panel { flex: 1; display: flex; flex-direction: column; padding: 16px; }
+#camera-wrap { flex: 1; position: relative; background: #0f0f1e; border-radius: 12px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+#video, #overlay { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+#overlay { pointer-events: none; }
+#cam-placeholder { color: #555; font-size: 14px; text-align: center; }
+#mode-toggle { position: absolute; top: 12px; right: 12px; background: rgba(0,0,0,0.6); border: 1px solid #444; color: #ccc; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; z-index: 10; }
+#mode-toggle:hover { background: rgba(255,255,255,0.15); }
+
+/* ===== 右侧：仪表盘 ===== */
+#dashboard { width: 360px; padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.panel { background: #16213e; border-radius: 10px; padding: 14px; }
+.panel h3 { font-size: 13px; color: #8a8a9a; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+
+/* 评分仪表 */
+#score-display { text-align: center; }
+#score-value { font-size: 56px; font-weight: bold; line-height: 1; }
+#score-label { font-size: 14px; margin-top: 4px; }
+.score-good { color: #4ade80; }
+.score-warn { color: #fbbf24; }
+.score-bad  { color: #f87171; }
+
+/* 指标条 */
+.metric-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; }
+.metric-name { color: #a0a0b0; }
+.metric-val { font-family: monospace; font-weight: bold; }
+.metric-bar { height: 6px; border-radius: 3px; background: #333; margin-bottom: 10px; overflow: hidden; }
+.metric-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s, background 0.3s; }
+
+/* 校准按钮 */
+#calibrate-btn { width: 100%; padding: 14px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; transition: background 0.2s; }
+#calibrate-btn:hover { background: #2563eb; }
+#calibrate-btn:disabled { background: #1e3a5f; color: #666; cursor: not-allowed; }
+#calibrate-status { text-align: center; font-size: 12px; margin-top: 6px; color: #888; }
+
+/* 久坐 / 20-20-20 */
+.timer-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; }
+.timer-val { font-family: monospace; font-weight: bold; color: #e0e0e0; }
+
+/* 提醒浮层 */
+#alert-overlay { position: fixed; top: 30%; left: 50%; transform: translateX(-50%); background: rgba(220, 38, 38, 0.95); color: white; padding: 24px 36px; border-radius: 12px; font-size: 18px; font-weight: bold; z-index: 100; display: none; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+#alert-overlay.show { display: block; animation: pulse 1.5s ease infinite; }
+@keyframes pulse { 0%,100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.05); } }
+
+/* 20-20-20 提醒 */
+#break-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 200; display: none; align-items: center; justify-content: center; flex-direction: column; }
+#break-overlay.show { display: flex; }
+#break-overlay h2 { font-size: 28px; margin-bottom: 12px; color: #4ade80; }
+#break-overlay p { font-size: 16px; margin-bottom: 24px; color: #ccc; }
+#break-countdown { font-size: 48px; font-weight: bold; color: #4ade80; margin-bottom: 24px; }
+#break-done-btn { padding: 12px 32px; background: #4ade80; color: #1a1a2e; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<!-- 左侧：摄像头 + 骨架叠加 -->
+<div id="camera-panel">
+  <div id="camera-wrap">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="overlay"></canvas>
+    <div id="cam-placeholder">点击"开始监测"启动摄像头</div>
+    <button id="mode-toggle" style="display:none">正面模式</button>
+  </div>
+  <div style="margin-top:12px; display:flex; gap:8px;">
+    <button id="start-btn" style="flex:1; padding:12px; background:#3b82f6; color:white; border:none; border-radius:8px; font-size:15px; cursor:pointer;">开始监测</button>
+  </div>
+</div>
+
+<!-- 右侧：仪表盘 -->
+<div id="dashboard">
+  <div class="panel" id="score-display">
+    <h3>姿态评分</h3>
+    <div id="score-value" class="score-warn">--</div>
+    <div id="score-label">未校准</div>
+  </div>
+
+  <div class="panel">
+    <h3>体态指标</h3>
+    <div class="metric-row"><span class="metric-name">头部前倾</span><span class="metric-val" id="m-head">--</span></div>
+    <div class="metric-bar"><div class="metric-bar-fill" id="bar-head" style="width:0%"></div></div>
+    <div class="metric-row"><span class="metric-name">面部距离</span><span class="metric-val" id="m-face">--</span></div>
+    <div class="metric-bar"><div class="metric-bar-fill" id="bar-face" style="width:0%"></div></div>
+    <div class="metric-row"><span class="metric-name">躯干前倾</span><span class="metric-val" id="m-torso">--</span></div>
+    <div class="metric-bar"><div class="metric-bar-fill" id="bar-torso" style="width:0%"></div></div>
+  </div>
+
+  <div class="panel">
+    <button id="calibrate-btn">校准基线坐姿</button>
+    <div id="calibrate-status">点击校准后开始监测</div>
+  </div>
+
+  <div class="panel">
+    <h3>时长统计</h3>
+    <div class="timer-row"><span>久坐时长</span><span class="timer-val" id="t-sitting">0 分钟</span></div>
+    <div class="timer-row"><span>距下次休息</span><span class="timer-val" id="t-break">20:00</span></div>
+    <div class="timer-row"><span>今日提醒次数</span><span class="timer-val" id="t-alerts">0</span></div>
+  </div>
+</div>
+
+<!-- 提醒浮层 -->
+<div id="alert-overlay">⚠️ 坐姿不良，请调整！</div>
+
+<!-- 20-20-20 休息浮层 -->
+<div id="break-overlay">
+  <h2>休息时间到！</h2>
+  <p>请看 6 米外的远处，放松眼睛</p>
+  <div id="break-countdown">20</div>
+  <button id="break-done-btn">我已休息</button>
+</div>
+
+<!-- MediaPipe CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675669404/pose.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+
+<script>
+// ============================================================
+//  AI 体态监测 Demo — 单文件 Vanilla JS
+//  架构决策见 docs/adr/，术语见 CONTEXT.md
+// ============================================================
+
+// ---- 配置 ----
+const CFG = {
+  POOR_THRESHOLD: 60,       // 评分低于此值视为不良
+  POOR_DURATION: 5,         // 持续 N 秒不良才提醒
+  COOLDOWN: 60,             // 提醒后冷却 N 秒
+  BREAK_INTERVAL: 20 * 60,  // 20-20-20 法则：20 分钟
+  BREAK_COUNTDOWN: 20,      // 休息倒计时 20 秒
+  HEAD_DEVIATION_WARN: 15,  // 头部前倾偏离基线 N% → 警告
+  HEAD_DEVIATION_BAD: 30,   // → 不良
+  FACE_DEVIATION_WARN: 15,  // 面部距离变化 N% → 警告
+  FACE_DEVIATION_BAD: 30,   // → 不良
+  TORSO_DEVIATION_WARN: 10, // 躯干前倾偏离 N° → 警告
+  TORSO_DEVIATION_BAD: 20,  // → 不良
+  SCORE_INTERVAL: 60000,    // 每分钟存一次评分
+};
+
+// ---- 状态 ----
+let pose = null, camera = null;
+let baseline = null;           // { headForward, faceDistance, torsoAngle }
+let sideMode = false;          // false=正面, true=侧面
+let poorSince = null;          // 不良开始的 timestamp
+let lastAlertTime = 0;         // 上次提醒时间
+let alertCount = 0;
+let sittingStart = Date.now();
+let breakStartTime = Date.now();
+let lastScoreTime = 0;
+let todayScores = [];
+let isCalibrating = false;      // onResults 检测此 flag 做校准收集
+let calibrationFrames = [];     // 校准用帧缓冲
+
+// ---- DOM ----
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d');
+
+// ---- localStorage ----
+function loadData() {
+  const raw = localStorage.getItem('posture_data');
+  if (!raw) return;
+  const d = JSON.parse(raw);
+  todayScores = d.todayScores || [];
+  alertCount = d.alertCount || 0;
+  sittingStart = d.sittingStart || Date.now();
+  breakStartTime = d.breakStartTime || Date.now();
+}
+function saveData() {
+  localStorage.setItem('posture_data', JSON.stringify({
+    todayScores, alertCount, sittingStart, breakStartTime,
+    date: new Date().toISOString().slice(0, 10),
+  }));
+}
+
+// ============================================================
+//  指标计算
+// ============================================================
+function calcMetrics(lm) {
+  // MediaPipe landmark indices
+  const nose = lm[0], lEar = lm[7], rEar = lm[8];
+  const lShoulder = lm[11], rShoulder = lm[12];
+  const lHip = lm[23], rHip = lm[24];
+
+  // 双肩中点
+  const shoulderMid = { x: (lShoulder.x + rShoulder.x) / 2, y: (lShoulder.y + rShoulder.y) / 2 };
+  // 双髋中点
+  const hipMid = { x: (lHip.x + rHip.x) / 2, y: (lHip.y + rHip.y) / 2 };
+
+  // 头部前倾：nose 相对 shoulderMid 的垂直距离比例
+  // 正面视角：坐直时鼻子远高于肩膀；头前探/下垂时鼻子向肩膀靠近
+  const headForward = shoulderMid.y - nose.y;  // 正值，越大越好（头越往后）
+
+  // 面部距离：双耳间距（越宽 = 脸越靠近摄像头）
+  const faceDistance = Math.abs(rEar.x - lEar.x);
+
+  // 躯干前倾角（仅侧面模式）：shoulder-hip 连线与垂直方向的夹角
+  let torsoAngle = null;
+  if (sideMode) {
+    const dx = hipMid.x - shoulderMid.x;
+    const dy = hipMid.y - shoulderMid.y;
+    torsoAngle = Math.atan2(Math.abs(dx), Math.abs(dy)) * 180 / Math.PI;
+  }
+
+  return { headForward, faceDistance, torsoAngle };
+}
+
+// ============================================================
+//  评分
+// ============================================================
+function calcScore(metrics) {
+  if (!baseline) return null;
+  let score = 100;
+
+  // 头部前倾：偏离基线的百分比
+  if (baseline.headForward > 0) {
+    const dev = (baseline.headForward - metrics.headForward) / baseline.headForward * 100;
+    if (dev > CFG.HEAD_DEVIATION_BAD) score -= 30;
+    else if (dev > CFG.HEAD_DEVIATION_WARN) score -= 15;
+  }
+
+  // 面部距离：变近 = 不良
+  if (baseline.faceDistance > 0) {
+    const dev = (metrics.faceDistance - baseline.faceDistance) / baseline.faceDistance * 100;
+    if (dev > CFG.FACE_DEVIATION_BAD) score -= 30;
+    else if (dev > CFG.FACE_DEVIATION_WARN) score -= 15;
+  }
+
+  // 躯干前倾角（侧面模式）
+  if (sideMode && baseline.torsoAngle != null && metrics.torsoAngle != null) {
+    const dev = metrics.torsoAngle - baseline.torsoAngle;
+    if (dev > CFG.TORSO_DEVIATION_BAD) score -= 30;
+    else if (dev > CFG.TORSO_DEVIATION_WARN) score -= 15;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+// ============================================================
+//  骨架绘制
+// ============================================================
+function drawSkeleton(lm, score) {
+  const w = overlay.width, h = overlay.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // 颜色
+  const color = score == null ? '#888' :
+    score >= 80 ? '#4ade80' : score >= 60 ? '#fbbf24' : '#f87171';
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.fillStyle = color;
+
+  // 连接对
+  const pairs = [
+    [11, 12],  // 双肩
+    [11, 13], [13, 15],  // 左臂
+    [12, 14], [14, 16],  // 右臂
+    [11, 23], [12, 24],  // 躯干两侧
+    [23, 24],  // 双髋
+    [23, 25], [25, 27],  // 左腿
+    [24, 26], [26, 28],  // 右腿
+  ];
+
+  // 画连线
+  for (const [a, b] of pairs) {
+    if (lm[a] && lm[b] && lm[a].visibility > 0.3 && lm[b].visibility > 0.3) {
+      ctx.beginPath();
+      ctx.moveTo(lm[a].x * w, lm[a].y * h);
+      ctx.lineTo(lm[b].x * w, lm[b].y * h);
+      ctx.stroke();
+    }
+  }
+
+  // 画关键点
+  for (let i of [0, 11, 12, 23, 24]) {  // nose, shoulders, hips
+    if (lm[i] && lm[i].visibility > 0.3) {
+      ctx.beginPath();
+      ctx.arc(lm[i].x * w, lm[i].y * h, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ============================================================
+//  UI 更新
+// ============================================================
+function updateUI(metrics, score) {
+  // 评分
+  const sv = $('score-value'), sl = $('score-label');
+  if (score == null) {
+    sv.textContent = '--'; sv.className = 'score-warn';
+    sl.textContent = '未校准';
+  } else {
+    sv.textContent = score;
+    sv.className = score >= 80 ? 'score-good' : score >= 60 ? 'score-warn' : 'score-bad';
+    sl.textContent = score >= 80 ? '良好' : score >= 60 ? '注意' : '不良';
+  }
+
+  // 指标
+  if (metrics) {
+    $('m-head').textContent = metrics.headForward.toFixed(3);
+    $('bar-head').style.width = Math.min(100, Math.abs(metrics.headForward) * 200) + '%';
+    $('bar-head').style.background = score >= 80 ? '#4ade80' : score >= 60 ? '#fbbf24' : '#f87171';
+
+    $('m-face').textContent = metrics.faceDistance.toFixed(3);
+    $('bar-face').style.width = Math.min(100, metrics.faceDistance * 300) + '%';
+    $('bar-face').style.background = score >= 80 ? '#4ade80' : score >= 60 ? '#fbbf24' : '#f87171';
+
+    if (metrics.torsoAngle != null) {
+      $('m-torso').textContent = metrics.torsoAngle.toFixed(1) + '°';
+      $('bar-torso').style.width = Math.min(100, metrics.torsoAngle * 3) + '%';
+    } else {
+      $('m-torso').textContent = sideMode ? '--' : '需侧面模式';
+      $('bar-torso').style.width = '0%';
+    }
+    $('bar-torso').style.background = score >= 80 ? '#4ade80' : score >= 60 ? '#fbbf24' : '#f87171';
+  }
+
+  // 时长
+  const sitMin = Math.floor((Date.now() - sittingStart) / 60000);
+  $('t-sitting').textContent = sitMin + ' 分钟';
+
+  const breakRemain = Math.max(0, CFG.BREAK_INTERVAL - Math.floor((Date.now() - breakStartTime) / 1000));
+  $('t-break').textContent = Math.floor(breakRemain / 60) + ':' + String(breakRemain % 60).padStart(2, '0');
+
+  $('t-alerts').textContent = alertCount;
+}
+
+// ============================================================
+//  提醒逻辑
+// ============================================================
+function checkAlert(score) {
+  const now = Date.now();
+
+  // 冷却期内不提醒
+  if (now - lastAlertTime < CFG.COOLDOWN * 1000) {
+    return;
+  }
+
+  if (score != null && score < CFG.POOR_THRESHOLD) {
+    if (poorSince == null) {
+      poorSince = now;
+    }
+    // 持续 N 秒不良 → 提醒
+    if (now - poorSince >= CFG.POOR_DURATION * 1000) {
+      $('alert-overlay').classList.add('show');
+      lastAlertTime = now;
+      alertCount++;
+      poorSince = null;
+      setTimeout(() => $('alert-overlay').classList.remove('show'), 3000);
+      saveData();
+    }
+  } else {
+    poorSince = null;
+    $('alert-overlay').classList.remove('show');
+  }
+}
+
+// ============================================================
+//  20-20-20 法则
+// ============================================================
+function checkBreak() {
+  const elapsed = (Date.now() - breakStartTime) / 1000;
+  if (elapsed >= CFG.BREAK_INTERVAL) {
+    triggerBreak();
+  }
+}
+
+function triggerBreak() {
+  const overlay = $('break-overlay');
+  overlay.classList.add('show');
+  let count = CFG.BREAK_COUNTDOWN;
+  $('break-countdown').textContent = count;
+  const timer = setInterval(() => {
+    count--;
+    $('break-countdown').textContent = count;
+    if (count <= 0) {
+      clearInterval(timer);
+      finishBreak();
+    }
+  }, 1000);
+}
+
+function finishBreak() {
+  $('break-overlay').classList.remove('show');
+  breakStartTime = Date.now();
+  saveData();
+}
+
+// ============================================================
+//  MediaPipe 回调
+// ============================================================
+function onResults(results) {
+  // 设置 canvas 尺寸
+  if (overlay.width !== video.videoWidth) {
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+  }
+
+  if (!results.poseLandmarks) {
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    return;
+  }
+
+  const lm = results.poseLandmarks;
+
+  // 校准模式：收集帧，不做正常处理
+  if (isCalibrating) {
+    const m = calcMetrics(lm);
+    calibrationFrames.push(m);
+    drawSkeleton(lm, null);  // 灰色骨架
+    $('calibrate-status').textContent = `校准中... ${calibrationFrames.length}/30`;
+    if (calibrationFrames.length >= 30) {
+      const median = arr => arr.sort((a,b)=>a-b)[Math.floor(arr.length/2)];
+      baseline = {
+        headForward: median(calibrationFrames.map(f=>f.headForward)),
+        faceDistance: median(calibrationFrames.map(f=>f.faceDistance)),
+        torsoAngle: sideMode ? median(calibrationFrames.filter(f=>f.torsoAngle!=null).map(f=>f.torsoAngle)) : null,
+      };
+      calibrationFrames = [];
+      isCalibrating = false;
+      $('calibrate-btn').disabled = false;
+      $('calibrate-btn').textContent = '重新校准';
+      $('calibrate-status').textContent = '✅ 校准完成，开始监测';
+    }
+    return;
+  }
+
+  const metrics = calcMetrics(lm);
+  const score = calcScore(metrics);
+
+  drawSkeleton(lm, score);
+  updateUI(metrics, score);
+  checkAlert(score);
+  checkBreak();
+
+  // 每分钟存一次评分
+  if (score != null && Date.now() - lastScoreTime > CFG.SCORE_INTERVAL) {
+    todayScores.push({ t: Date.now(), s: score });
+    if (todayScores.length > 480) todayScores.shift();  // 最多存 8 小时
+    lastScoreTime = Date.now();
+    saveData();
+  }
+}
+
+// ============================================================
+//  启动
+// ============================================================
+$('start-btn').onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }
+    });
+    video.srcObject = stream;
+    $('cam-placeholder').style.display = 'none';
+    $('start-btn').style.display = 'none';
+    $('mode-toggle').style.display = 'block';
+    sittingStart = Date.now();
+    breakStartTime = Date.now();
+
+    // 初始化 MediaPipe Pose
+    pose = new Pose({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675669404/${file}`
+    });
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    pose.onResults(onResults);
+
+    // 用 MediaPipe Camera 工具驱动帧循环
+    camera = new Camera(video, {
+      onFrame: async () => { await pose.send({ image: video }); },
+      width: 640, height: 480,
+    });
+    camera.start();
+
+    loadData();
+    // 如果是新的一天，重置
+    const today = new Date().toISOString().slice(0, 10);
+    const data = JSON.parse(localStorage.getItem('posture_data') || '{}');
+    if (data.date !== today) {
+      todayScores = [];
+      alertCount = 0;
+    }
+
+    setInterval(updateUI, 1000);  // 每秒刷新时长显示
+  } catch (e) {
+    alert('无法访问摄像头：' + e.message);
+  }
+};
+
+// ---- 校准按钮 ----
+$('calibrate-btn').onclick = () => {
+  if (isCalibrating) return;
+  isCalibrating = true;
+  calibrationFrames = [];
+  $('calibrate-btn').disabled = true;
+  $('calibrate-status').textContent = '请保持正确坐姿...';
+  // onResults 会检测 isCalibrating flag 自动收集帧
+};
+
+// ---- 模式切换 ----
+$('mode-toggle').onclick = () => {
+  sideMode = !sideMode;
+  $('mode-toggle').textContent = sideMode ? '侧面模式' : '正面模式';
+  if (baseline) {
+    baseline.torsoAngle = null;
+    $('calibrate-status').textContent = '切换模式后请重新校准';
+  }
+};
+
+// ---- 20-20-20 完成 ----
+$('break-done-btn').onclick = finishBreak;
+</script>
+</body>
+</html>
